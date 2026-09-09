@@ -1,4 +1,5 @@
 import argparse 
+import gzip
 from data_processing import *
 from sklearn.exceptions import ConvergenceWarning, FitFailedWarning
 import warnings 
@@ -19,22 +20,28 @@ from sksurv.svm import FastSurvivalSVM
 
 
 
+tcga_cache = {}
+
 def eval_aggy(data_type, encoded_gender, eval_model="coxnet"):
+    global tcga_cache
 
     # get survival information for TCGA-BLCA (vital status and survival time in months)
     clinical = get_survival_data()
 
     # depending on the desired data type, load the omics matrix 
-    if data_type == "expr": 
-        data = get_tcga_expr("gene_name", "tpm")
-    elif data_type == "methy": 
-        data = get_tcga_methy()
-    elif data_type == "mirna": 
-        data = get_tcga_mirna()
-    elif data_type == "protein":
-        data = get_tcga_protein()
-    else: 
-        raise Exception("Input valid data type!")
+    if data_type not in tcga_cache:
+        if data_type == "expr": 
+            tcga_cache[data_type] = get_tcga_expr("gene_name", "tpm")
+        elif data_type == "methy": 
+            tcga_cache[data_type] = get_tcga_methy()
+        elif data_type == "mirna": 
+            tcga_cache[data_type] = get_tcga_mirna()
+        elif data_type == "protein":
+            tcga_cache[data_type] = get_tcga_protein()
+        else: 
+            raise Exception("Input valid data type!")
+            
+    data = tcga_cache[data_type]
 
     # merge clinical and omics data
     omic_w_clinical = clinical.join(data, how="inner")
@@ -46,6 +53,7 @@ def eval_aggy(data_type, encoded_gender, eval_model="coxnet"):
     # drop survival information from omics data, store it in separate variable then convert to record 
     X = data.drop(["duration", "event"], axis=1)
     y = data[["event", "duration"]].copy()
+    y["duration"] = y["duration"] / 30.437
     y["event"] = y["event"].astype(bool)
     y = y.to_records(index=False)
 
@@ -113,9 +121,9 @@ def eval_aggy(data_type, encoded_gender, eval_model="coxnet"):
             associated_aucs = auc
 
     # print info after all # of genes have been tested 
-    print(best_cindex)
-    print(num_genes)
-    print(associated_aucs)
+    gender_str = "Male" if encoded_gender == 1 else "Female"
+    print(f"[{eval_model.upper()} - {gender_str}] Best C-index: {best_cindex:.4f} (with {num_genes} genes)")
+    print(f"[{eval_model.upper()} - {gender_str}] Associated AUCs (1, 3, 5 years): {associated_aucs}")
 
 
 
@@ -349,67 +357,136 @@ class QuantileNorm(BaseEstimator, TransformerMixin):
 
 def get_external_expr(encoded_gender): 
 
-    # load data
-    ex = pd.read_csv(".\\GSE13507_RAW\\GSE13507_illumina_raw.txt", sep="\t", index_col=0) 
+    # 1. Load annotation table to get probe to gene mapping
+    gpl_path = "GSE22541_RAW/GPL570_annotation.txt"
+    probe_to_gene = {}
+    with open(gpl_path, "r", encoding="utf-8", errors="ignore") as f:
+        found_table = False
+        for line in f:
+            if line.startswith("!platform_table_begin"):
+                found_table = True
+                continue
+            if line.startswith("!platform_table_end"):
+                break
+            if found_table:
+                parts = line.strip().split("\t")
+                if len(parts) > 10:
+                    probe_id = parts[0]
+                    gene_symbol = parts[10].strip()
+                    if gene_symbol and gene_symbol != "Gene Symbol":
+                        symbol = gene_symbol.split("///")[0].strip()
+                        probe_to_gene[probe_id] = symbol
 
-    # load conversion key 
-    gene_table = pd.read_csv(".\\GSE13507_RAW\GPL6102_Illumina_HumanWG-6_V2_0_R1_11223189_A.bgx", sep="\t", skiprows=8).set_index("Probe_Id")["ILMN_Gene"].to_dict()
-
-    # change probes to be columns rather than rows, then convert to gene names
-    ex = ex.T
-    ex = ex.rename(columns=gene_table)
+    # 2. Load GSE22541 expression matrix
+    matrix_path = "GSE22541_RAW/GSE22541_series_matrix.txt.gz"
     
-    # keep only columns that were in the dictionary
-    ex = ex[[col for col in ex.columns if col in set(gene_table.values())]]
+    # Parse clinical characteristics from header
+    samples_meta = []
+    expression_lines = []
+    with gzip.open(matrix_path, "rt", encoding="utf-8", errors="ignore") as f:
+        found_data = False
+        for line in f:
+            if line.startswith("!Sample_geo_accession"):
+                parts = line.strip().split("\t")
+                geo_ids = [v.strip("\"") for v in parts[1:]]
+                for geo in geo_ids:
+                    samples_meta.append({"geo_accession": geo})
+            elif line.startswith("!Sample_characteristics_ch1"):
+                parts = line.strip().split("\t")
+                vals = [v.strip("\"") for v in parts[1:]]
+                for idx, val in enumerate(vals):
+                    if ":" in val:
+                        key, value = val.split(":", 1)
+                        samples_meta[idx][key.strip().lower()] = value.strip()
+                    elif "=" in val:
+                        key, value = val.split("=", 1)
+                        samples_meta[idx][key.strip().lower()] = value.strip()
+            elif line.startswith("!series_matrix_table_begin"):
+                found_data = True
+                continue
+            elif line.startswith("!series_matrix_table_end"):
+                break
+            elif found_data:
+                expression_lines.append(line.strip())
 
-    # average duplicate gene columns
-    ex = ex.T.groupby(level=0).mean().T
+    # Build expression dataframe
+    header_parts = expression_lines[0].split("\t")
+    sample_columns = [h.strip("\"") for h in header_parts[1:]]
+    
+    data_rows = []
+    row_names = []
+    for line in expression_lines[1:]:
+        parts = line.split("\t")
+        row_names.append(parts[0].strip("\""))
+        data_rows.append([float(x) for x in parts[1:]])
+    
+    ex_df = pd.DataFrame(data_rows, index=row_names, columns=sample_columns)
 
-    # log2 transform with a floor - negative and zero values are converted to 1
-    ex[ex <= 0] = 1 
+    # Map probes to gene symbols
+    ex_df = ex_df.loc[ex_df.index.isin(probe_to_gene.keys())]
+    ex_df = ex_df.rename(index=probe_to_gene)
+    
+    # Average duplicate gene rows
+    ex_df = ex_df.groupby(level=0).mean()
+    
+    # Transpose to have genes as columns, samples as rows
+    ex = ex_df.T
+
+    # log2 transform
+    ex[ex <= 0] = 1
     ex_log = np.log2(ex)
 
-    # quantile normalize 
+    # Quantile normalize
     ex_log_qn = QuantileNorm().fit_transform(ex_log)
+
+    # Compile clinical metadata
+    df_meta = pd.DataFrame(samples_meta).set_index("geo_accession")
     
-    # now determine which samples are control/tumor by getting key and converting 
-    sample_key = pd.read_csv(".\\GSE13507_RAW\\GSE13507_key.txt", sep="\t", header=None)
-    tumor_meta = sample_key[sample_key[1].str.contains("bladder", case=False)]
+    # Filter only primary clear-cell renal cell carcinoma tumors
+    primary_meta = df_meta[df_meta["tissue"] == "primary clear-cell renal cell carcinoma"].copy()
 
-    # convert to study ID rather than GEO ID for purposes of identifying sex
-    id_map = dict(zip(tumor_meta[0], tumor_meta[1].str.extract(r'(BT\d+)')[0]))
+    # Parse gender and survival data
+    clinical_rows = []
+    for geo_id, row in primary_meta.iterrows():
+        # Parse gender
+        gender_raw = str(row.get("gender", "")).lower()
+        if "female" in gender_raw or gender_raw == "f":
+            sex = "F"
+        elif "male" in gender_raw or gender_raw == "m":
+            sex = "M"
+        else:
+            continue
+            
+        # Parse survival
+        dfs_val = str(row.get("dfs/follow-up", ""))
+        if "DFS =" in dfs_val:
+            event = True
+            duration = float(dfs_val.split("=")[1].split()[0])
+        elif "Follow-up =" in dfs_val:
+            event = False
+            duration = float(dfs_val.split("=")[1].split()[0])
+        else:
+            continue
+            
+        clinical_rows.append({
+            "geo_accession": geo_id,
+            "sex": sex,
+            "event": event,
+            "duration": duration
+        })
 
-    # only include tumor samples 
-    tumor_data = ex_log_qn.loc[ex_log_qn.index.isin(tumor_meta[0])]
-    tumor_data.index = tumor_data.index.map(id_map)
-    # make the ID a column rather than the index
-    tumor_data = tumor_data.reset_index()
+    clinical = pd.DataFrame(clinical_rows).set_index("geo_accession")
 
-    # now determine the sex of each tumor sample with the appropriate key 
-    clinical = pd.read_csv(".\\GSE13507_RAW\\GSE13507_clinical_info.csv").set_index("Sample name")[["SEX", "overall survival", "survivalMonth"]]
-    # change such that 1 = death and 0 = survived for OS 
-    clinical["overall survival"] = clinical["overall survival"] - 1
-    # merge clinical info with expression data 
-    merged = clinical.merge(tumor_data, left_index=True, right_on='index', how='inner')
-    
-    # get gender of interest 
-    if encoded_gender == 1: 
-        merged = merged[merged["SEX"] == "M"]
-    else:
-        merged = merged[merged["SEX"] == "F"]
+    # Merge expression and clinical
+    merged = clinical.join(ex_log_qn, how="inner")
 
-    merged = merged.drop(["SEX"], axis=1)
+    # Split by gender
+    target_sex = "M" if encoded_gender == 1 else "F"
+    cohort = merged[merged["sex"] == target_sex]
 
-    # X is just the expression data
-    X = merged.drop(["survivalMonth", "overall survival", "index"], axis=1)
-
-    # y is survival info
-    y = merged[["survivalMonth", "overall survival"]].copy()
-
-    # rename to standard for prognostic modeling and make sure vital status is boolean 
-    y = y.rename(columns={"survivalMonth":"duration", "overall survival":"event"})
+    X = cohort.drop(["sex", "event", "duration"], axis=1)
+    y = cohort[["event", "duration"]].copy()
     y["event"] = y["event"].astype(bool)
-    y = y[["event", "duration"]]
     y = y.to_records(index=False)
 
     return X, y

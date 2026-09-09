@@ -141,7 +141,7 @@ def rf_survival(omic_df, survival_array, folds):
         survival_array,
         n_repeats=10,
         random_state=folds.random_state,
-        n_jobs=1,
+        n_jobs=-1,
         scoring=cindex_scorer  
     )
 

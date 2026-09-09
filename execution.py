@@ -10,7 +10,7 @@ from sklearn.model_selection import KFold
 parser = argparse.ArgumentParser()
 parser.add_argument("--rando", type=int, required=True)
 parser.add_argument("--data_type", type=str, required=True)
-parser.add_argument("--compare_after_cox", type=str, required=True)
+parser.add_argument("--compare_after_cox", type=str, default="Y")
 args = parser.parse_args() 
 
 rando = args.rando
@@ -68,6 +68,19 @@ def nested_discovery(data_type, rando):
 
     # iterate over folds
     for fold in range(5):
+        # Checkpoint resumption logic
+        male_path = os.path.expanduser(
+            f"~/spring_2026/results_folded_1/"
+            f"{data_type}_male_fold_{fold}_rando{rando}.csv"
+        )
+        female_path = os.path.expanduser(
+            f"~/spring_2026/results_folded_1/"
+            f"{data_type}_female_fold_{fold}_rando{rando}.csv"
+        )
+        if (os.path.exists(male_path) and os.path.getsize(male_path) > 0 and 
+            os.path.exists(female_path) and os.path.getsize(female_path) > 0):
+            print(f"Fold {fold} already fully completed for both sexes, skipping.")
+            continue
 
         uni_results = {}
 
@@ -111,13 +124,24 @@ def nested_discovery(data_type, rando):
                 X_test,
                 y_train,
                 y_test,
-                sig_genes
+                sig_genes,
+                uni
             )
 
         # remove overlapping genes between males and females 
         # this acts as a sex-specific filter - remove genes that are tumor-related regardless of sex 
-        male_specific   = uni_results["male"][4]   - uni_results["female"][4]
-        female_specific = uni_results["female"][4] - uni_results["male"][4]
+        male_specific_raw   = uni_results["male"][4]   - uni_results["female"][4]
+        female_specific_raw = uni_results["female"][4] - uni_results["male"][4]
+
+        # Sort by p-value in their respective univariate analysis, and keep top 200
+        male_uni_df = uni_results["male"][5]
+        female_uni_df = uni_results["female"][5]
+
+        male_specific_sorted = male_uni_df[male_uni_df["variable"].isin(male_specific_raw)].sort_values("p_value")
+        female_specific_sorted = female_uni_df[female_uni_df["variable"].isin(female_specific_raw)].sort_values("p_value")
+
+        male_specific = set(male_specific_sorted["variable"].head(200).tolist())
+        female_specific = set(female_specific_sorted["variable"].head(200).tolist())
 
         # determine overlap for fun 
         overlap = uni_results["male"][4] & uni_results["female"][4]
@@ -137,7 +161,7 @@ def nested_discovery(data_type, rando):
         }.items():
 
             # for given sex get training, testing data 
-            X_train, X_test, y_train, y_test, _ = uni_results[sex]
+            X_train, X_test, y_train, y_test, _, _ = uni_results[sex]
 
             # make sure there were sex-specific genes found 
             if len(specific_genes) == 0:
@@ -201,6 +225,7 @@ def nested_discovery(data_type, rando):
                 f"~/spring_2026/results_folded_1/"
                 f"{data_type}_{sex}_fold_{fold}_rando{rando}.csv"
             )
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
             # 20 iterations of 5-fold nested CV = 100 rankings * 2 genders = 200 rankings in results folder 
             rra_df.to_csv(out_path, index=False)
@@ -254,6 +279,19 @@ def nested_discovery_no_cross(data_type, rando):
 
     # iterate over folds
     for fold in range(5):
+        # Checkpoint resumption logic
+        male_path = os.path.expanduser(
+            f"~/spring_2026/results_folded_2/"
+            f"{data_type}_male_fold_{fold}_rando{rando}.csv"
+        )
+        female_path = os.path.expanduser(
+            f"~/spring_2026/results_folded_2/"
+            f"{data_type}_female_fold_{fold}_rando{rando}.csv"
+        )
+        if (os.path.exists(male_path) and os.path.getsize(male_path) > 0 and 
+            os.path.exists(female_path) and os.path.getsize(female_path) > 0):
+            print(f"Fold {fold} already fully completed for both sexes, skipping.")
+            continue
 
         uni_results = {}
 
@@ -280,9 +318,13 @@ def nested_discovery_no_cross(data_type, rando):
 
             uni = univariate_cox(train_df)
 
-            sig_genes = set(
+            sig_genes_raw = set(
                 uni.loc[uni["p_value"] < 0.05, "variable"].tolist()
             )
+
+            # Sort by p-value and keep top 200
+            sig_genes_sorted = uni[uni["variable"].isin(sig_genes_raw)].sort_values("p_value")
+            sig_genes = set(sig_genes_sorted["variable"].head(200).tolist())
 
             uni_results[sex] = (
                 X_train,
@@ -346,6 +388,7 @@ def nested_discovery_no_cross(data_type, rando):
                 f"~/spring_2026/results_folded_2/"
                 f"{data_type}_{sex}_fold_{fold}_rando{rando}.csv"
             )
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
             rra_df.to_csv(out_path, index=False)
 

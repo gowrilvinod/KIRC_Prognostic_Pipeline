@@ -151,7 +151,11 @@ Thumbs.db
 # Project-specific biological data directories (large files)
 TCGA_KIRC_RNA_seq/
 GSE13507_RAW/
+GSE22541_RAW/
+CPTAC_KIRC/
 Metadata/
+scratch/
 
 # Excel temp files
 ~$*.xlsx
+
