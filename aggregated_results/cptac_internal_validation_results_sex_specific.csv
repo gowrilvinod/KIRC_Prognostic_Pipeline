@@ -1,0 +1,9 @@
+Cohort,Model,CV Procedure,N Patients,N Deaths,C-Index,1-Yr AUC,3-Yr AUC,5-Yr AUC,Log-Rank p,HR (95% CI),Failed Folds
+CPTAC-Male (Internal OOF),Coxnet,5-Fold OOF CV,55,8,0.7256,0.446,0.749,0.778,0.0115,6.98 [1.17-41.62],0/5
+CPTAC-Male (Internal OOF),Random Forest,5-Fold OOF CV,55,8,0.6463,0.511,0.775,0.658,0.2320,2.21 [0.56-8.76],0/5
+CPTAC-Male (Internal OOF),Survival SVM,5-Fold OOF CV,55,8,0.7409,0.467,0.790,0.832,0.1522,2.77 [0.62-12.42],0/5
+CPTAC-Male (Internal OOF),Gradient Boosting,5-Fold OOF CV,55,8,0.7896,0.837,0.853,0.702,0.1181,3.01 [0.67-13.47],0/5
+CPTAC-Female (Internal OOF),Coxnet,5-Fold OOF CV,29,6,0.8880,1.000,0.898,0.872,4.8148e-04,43.40 [1.53-1232.69],0/5
+CPTAC-Female (Internal OOF),Random Forest,5-Fold OOF CV,29,6,0.9200,1.000,0.898,0.954,0.0026,33.51 [1.08-1035.48],0/5
+CPTAC-Female (Internal OOF),Survival SVM,5-Fold OOF CV,29,6,0.9760,1.000,0.989,1.000,0.0034,31.84 [1.01-1001.46],0/5
+CPTAC-Female (Internal OOF),Gradient Boosting,5-Fold OOF CV,29,6,0.8960,0.959,0.923,0.817,0.0026,33.51 [1.08-1035.48],0/5

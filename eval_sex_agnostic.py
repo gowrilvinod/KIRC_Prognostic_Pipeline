@@ -176,23 +176,50 @@ def get_tcga_data(genes):
 # ------------------------------------------------------------------
 # External Data Loaders
 # ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# External Data Loaders
+# ------------------------------------------------------------------
 def load_cptac_dataset(genes):
-    df_clinical = dp.load_clean_cptac_clinical()
-    cptac_dir = Path("./CPTAC_KIRC")
-    cptac_files = list(cptac_dir.glob("*.tsv"))
+    clinical_path = Path("./CPTAC_KIRC/Metadata/clinical.tsv")
+    if not clinical_path.exists():
+        print("CPTAC clinical file not found.")
+        return pd.DataFrame()
+    df_clinical = dp.load_clean_kirc_clinical(clinical_path)
+    clean_case_ids = set(df_clinical.index)
+    
+    biospec_path = Path("./CPTAC_KIRC/Metadata/cptac_biospecimen_map.json")
+    if not biospec_path.exists():
+        print("CPTAC biospecimen map not found.")
+        return pd.DataFrame()
+    with open(biospec_path, "r") as f:
+        biospec_map = json.load(f)
+        
+    case_to_file = {}
+    for fname, info in biospec_map.items():
+        case_id = info["case_id"]
+        if case_id in clean_case_ids:
+            if case_id not in case_to_file:
+                case_to_file[case_id] = fname
+            else:
+                case_to_file[case_id] = min(case_to_file[case_id], fname)
+                
+    expression_dir = Path("./CPTAC_KIRC/CPTAC_RNA_seq")
     records = []
-    for fpath in cptac_files:
-        case_id = fpath.stem.split(".")[0]
-        if case_id not in df_clinical.index:
+    for case_id, fname in case_to_file.items():
+        fpath = expression_dir / fname
+        if not fpath.exists():
             continue
-        df_expr = pd.read_csv(fpath, sep="\t", skiprows=[0, 2, 3, 4, 5])
+            
+        df_expr = pd.read_csv(fpath, sep="\t", skiprows=1)
         df_expr_sig = df_expr[df_expr["gene_name"].isin(genes)]
+        
         patient_record = {
             "case_id": case_id,
             "event": df_clinical.loc[case_id, "event"],
             "duration": df_clinical.loc[case_id, "duration"] / 30.437,
             "Gender": df_clinical.loc[case_id, "Gender"]
         }
+        
         for _, row in df_expr_sig.iterrows():
             gname = row["gene_name"]
             tpm = float(row["tpm_unstranded"])
@@ -206,7 +233,9 @@ def load_icgc_dataset(genes):
         "ENSG00000244734": "HBB", "ENSG00000124762": "CDKN1A", "ENSG00000149948": "HMGA2",
         "ENSG00000171243": "HS3ST3A1", "ENSG00000151136": "ADAM8", "ENSG00000139874": "SSTR1",
         "ENSG00000102575": "ACP5", "ENSG00000181634": "TNFSF15", "ENSG00000165030": "NUDT2",
-        "ENSG00000147403": "ACTN2", "ENSG00000137449": "CTTNBP2"
+        "ENSG00000147403": "ACTN2", "ENSG00000137449": "CTTNBP2",
+        "ENSG00000253818": "LINC01914", "ENSG00000249214": "MELTF-AS1", "ENSG00000120156": "TEK",
+        "ENSG00000215277": "SPANXB1", "ENSG00000224870": "SPANXB1", "ENSG00000175806": "AJAP1"
     }
     def get_all_keys(prefix):
         keys, marker = [], ""
@@ -300,6 +329,123 @@ def load_icgc_dataset(genes):
                 rpkm = pd_item["expression"][ensg]
                 tpm = (rpkm / tot_rpkm) * 1e6
                 rec[sym] = np.log2(tpm + 1)
+        records.append(rec)
+
+    return pd.DataFrame(records)
+
+def load_gse22541_dataset(genes):
+    gpl_path = Path("GSE22541_RAW/GPL570_annotation.txt")
+    if not gpl_path.exists():
+        print("GSE22541 annotation file not found.")
+        return pd.DataFrame()
+    probe_to_gene = {}
+    with open(gpl_path, "r", encoding="utf-8", errors="ignore") as f:
+        found_table = False
+        for line in f:
+            if line.startswith("!platform_table_begin"):
+                found_table = True
+                continue
+            if line.startswith("!platform_table_end"):
+                break
+            if found_table:
+                parts = line.strip().split("\t")
+                if len(parts) > 10:
+                    probe_id = parts[0]
+                    gene_symbol = parts[10].strip()
+                    if gene_symbol and gene_symbol != "Gene Symbol":
+                        symbol = gene_symbol.split("///")[0].strip()
+                        if symbol in genes:
+                            probe_to_gene[probe_id] = symbol
+
+    matrix_path = Path("GSE22541_RAW/GSE22541_series_matrix.txt.gz")
+    if not matrix_path.exists():
+        print("GSE22541 matrix file not found.")
+        return pd.DataFrame()
+    
+    samples_meta = []
+    expression_lines = []
+    with gzip.open(matrix_path, "rt", encoding="utf-8", errors="ignore") as f:
+        found_data = False
+        for line in f:
+            if line.startswith("!Sample_geo_accession"):
+                parts = line.strip().split("\t")
+                geo_ids = [v.strip("\"") for v in parts[1:]]
+                for geo in geo_ids:
+                    samples_meta.append({"geo_accession": geo})
+            elif line.startswith("!Sample_characteristics_ch1"):
+                parts = line.strip().split("\t")
+                vals = [v.strip("\"") for v in parts[1:]]
+                for idx, val in enumerate(vals):
+                    if ":" in val:
+                        key, value = val.split(":", 1)
+                        samples_meta[idx][key.strip().lower()] = value.strip()
+                    elif "=" in val:
+                        key, value = val.split("=", 1)
+                        samples_meta[idx][key.strip().lower()] = value.strip()
+            elif line.startswith("!series_matrix_table_begin"):
+                found_data = True
+                continue
+            elif line.startswith("!series_matrix_table_end"):
+                break
+            elif found_data:
+                expression_lines.append(line.strip())
+
+    if not expression_lines:
+        return pd.DataFrame()
+
+    header_parts = expression_lines[0].split("\t")
+    sample_columns = [h.strip("\"") for h in header_parts[1:]]
+    
+    data_rows = []
+    row_names = []
+    for line in expression_lines[1:]:
+        parts = line.split("\t")
+        p_name = parts[0].strip("\"")
+        if p_name in probe_to_gene:
+            row_names.append(p_name)
+            data_rows.append([float(x) for x in parts[1:]])
+    
+    if not data_rows:
+        return pd.DataFrame()
+
+    ex_df = pd.DataFrame(data_rows, index=row_names, columns=sample_columns)
+    ex_df = ex_df.rename(index=probe_to_gene)
+    ex_df = ex_df.groupby(level=0).mean().T
+
+    df_meta = pd.DataFrame(samples_meta).set_index("geo_accession")
+    primary_meta = df_meta[df_meta["tissue"] == "primary clear-cell renal cell carcinoma"].copy()
+
+    records = []
+    for geo_id, row in primary_meta.iterrows():
+        if geo_id not in ex_df.index:
+            continue
+        gender_raw = str(row.get("gender", "")).lower()
+        if "female" in gender_raw or gender_raw == "f":
+            encoded_gender = 0
+        elif "male" in gender_raw or gender_raw == "m":
+            encoded_gender = 1
+        else:
+            continue
+            
+        dfs_val = str(row.get("dfs/follow-up", ""))
+        if "DFS =" in dfs_val:
+            event = 1
+            duration = float(dfs_val.split("=")[1].split()[0])
+        elif "Follow-up =" in dfs_val:
+            event = 0
+            duration = float(dfs_val.split("=")[1].split()[0])
+        else:
+            continue
+
+        rec = {
+            "case_id": geo_id,
+            "Gender": encoded_gender,
+            "event": event,
+            "duration": duration
+        }
+        for g in genes:
+            if g in ex_df.columns:
+                rec[g] = float(ex_df.loc[geo_id, g])
         records.append(rec)
 
     return pd.DataFrame(records)
@@ -428,15 +574,17 @@ def evaluate_external_method_a(cohort_name, df_val, X_train, y_train, genes):
 # Main Orchestrator
 # ------------------------------------------------------------------
 def main():
-    ranking_file = Path("./aggregated_results/sex_agnostic_aggregated_ranking.csv")
+    ranking_file = Path("./aggregated_results/sex_agnostic_expr_aggregated_ranking.csv")
     if not ranking_file.exists():
-        print(f"Error: {ranking_file} not found. Run execution_sex_agnostic.py first.")
+        ranking_file = Path("./aggregated_results/sex_agnostic_aggregated_ranking.csv")
+    if not ranking_file.exists():
+        print(f"Error: ranking file not found in ./aggregated_results/. Run aggregate_sex_agnostic.py first.")
         return
 
     rank_df = pd.read_csv(ranking_file)
-    top_8_genes = rank_df["Name"].head(8).tolist()
+    top_genes = rank_df["Name"].tolist()
 
-    X_tcga, y_tcga, genders_tcga, avail_genes = get_tcga_data(top_8_genes)
+    X_tcga, y_tcga, genders_tcga, avail_genes = get_tcga_data(top_genes)
     
     # 1. TCGA Internal CV Evaluation
     evaluate_tcga_internal(X_tcga, y_tcga, genders_tcga, avail_genes)
@@ -453,5 +601,12 @@ def main():
     if len(df_icgc) > 0:
         evaluate_external_method_a("ICGC RECA-EU RNA-seq", df_icgc, X_tcga, y_tcga, avail_genes)
 
+    # 4. GSE22541 External Validation
+    print("\nLoading GSE22541 dataset...")
+    df_gse = load_gse22541_dataset(avail_genes)
+    if len(df_gse) > 0:
+        evaluate_external_method_a("GSE22541 Microarray", df_gse, X_tcga, y_tcga, avail_genes)
+
 if __name__ == "__main__":
     main()
+
